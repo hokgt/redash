@@ -31,10 +31,6 @@ function orderedInputs(properties, order, targetOptions) {
 
 function normalizeSchema(configurationSchema) {
   each(configurationSchema.properties, (prop, name) => {
-    if (name === "password" || name === "passwd") {
-      prop.type = "password";
-    }
-
     if (name.endsWith("File")) {
       prop.type = "file";
     }
@@ -44,7 +40,18 @@ function normalizeSchema(configurationSchema) {
     }
 
     if (prop.type === "string") {
-      prop.type = "text";
+      // Check if this is a password field
+      if (name === "password" || name === "passwd" || name.includes("password") || name.includes("passphrase")) {
+        prop.type = "password";
+      } else if (name.includes("private_key_path") || name.includes("_path") && name.includes("key")) {
+        // File path fields - use filepath selector
+        prop.type = "filepath";
+      } else if (name.includes("private_key") || (name.includes("key") && name.includes("private"))) {
+        // Private keys are typically multi-line, use textarea
+        prop.type = "textarea";
+      } else {
+        prop.type = "text";
+      }
     }
 
     if (!isEmpty(prop.enum)) {
@@ -80,12 +87,42 @@ function setDefaultValueToFields(configurationSchema, options = {}) {
   });
 }
 
+function flattenSSHTunnel(options) {
+  // If ssh_tunnel exists, flatten it to ssh_tunnel_* fields for form display
+  if (options && options.ssh_tunnel) {
+    const sshTunnel = options.ssh_tunnel;
+    const flattened = { ...options };
+    
+    flattened.ssh_tunnel_enabled = true;
+    flattened.ssh_tunnel_host = sshTunnel.ssh_host || "";
+    flattened.ssh_tunnel_port = sshTunnel.ssh_port || 22;
+    flattened.ssh_tunnel_username = sshTunnel.ssh_username || "";
+    // Map ssh_private_key to ssh_tunnel_private_key_path for file path field
+    // If ssh_private_key_path exists, use it; otherwise use ssh_private_key (might be a path or content)
+    flattened.ssh_tunnel_private_key_path = sshTunnel.ssh_private_key_path || sshTunnel.ssh_private_key || "";
+    flattened.ssh_tunnel_passphrase = sshTunnel.ssh_passphrase || "";
+    flattened.ssh_tunnel_password = sshTunnel.ssh_password || "";
+    
+    // Remove the nested ssh_tunnel object
+    delete flattened.ssh_tunnel;
+    
+    return flattened;
+  }
+  // Return a copy to avoid mutating the original
+  return options ? { ...options } : {};
+}
+
 function getFields(type = {}, target = { options: {} }) {
   const configurationSchema = type.configuration_schema;
   normalizeSchema(configurationSchema);
-  const hasTargetObject = Object.keys(target.options).length > 0;
+  
+  // Flatten SSH tunnel if it exists (create a copy to avoid mutating original)
+  const flattenedOptions = flattenSSHTunnel(target.options);
+  const optionsForFields = flattenedOptions;
+  
+  const hasTargetObject = Object.keys(optionsForFields).length > 0;
   if (!hasTargetObject) {
-    setDefaultValueToFields(configurationSchema, target.options);
+    setDefaultValueToFields(configurationSchema, optionsForFields);
   }
 
   const isNewTarget = !target.id;
@@ -100,19 +137,87 @@ function getFields(type = {}, target = { options: {} }) {
       placeholder: `My ${type.name}`,
       autoFocus: isNewTarget,
     },
-    ...orderedInputs(configurationSchema.properties, configurationSchema.order, target.options),
+    ...orderedInputs(configurationSchema.properties, configurationSchema.order, optionsForFields),
   ];
 
   return inputs;
 }
 
+function transformSSHTunnelFields(values) {
+  // Transform flat ssh_tunnel_* fields to nested ssh_tunnel object
+  const transformed = { ...values };
+  const sshTunnelFields = {};
+  
+  // Check if SSH tunnel is enabled
+  const sshTunnelEnabled = transformed.ssh_tunnel_enabled;
+  
+  if (sshTunnelEnabled) {
+    // Collect SSH tunnel fields
+    if (transformed.ssh_tunnel_host) {
+      sshTunnelFields.ssh_host = transformed.ssh_tunnel_host;
+    }
+    if (transformed.ssh_tunnel_port !== undefined && transformed.ssh_tunnel_port !== null) {
+      sshTunnelFields.ssh_port = transformed.ssh_tunnel_port;
+    }
+    if (transformed.ssh_tunnel_username) {
+      sshTunnelFields.ssh_username = transformed.ssh_tunnel_username;
+    }
+    // Handle private key path - read the file if path is provided
+    if (transformed.ssh_tunnel_private_key_path) {
+      // Store the file path - the backend will read the file from this path
+      sshTunnelFields.ssh_private_key_path = transformed.ssh_tunnel_private_key_path;
+      // Also set ssh_private_key for backward compatibility (backend expects this)
+      sshTunnelFields.ssh_private_key = transformed.ssh_tunnel_private_key_path;
+    } else if (transformed.ssh_tunnel_private_keyFile) {
+      // Handle old file upload field (base64 content)
+      sshTunnelFields.ssh_private_key = transformed.ssh_tunnel_private_keyFile;
+    } else if (transformed.ssh_tunnel_private_key) {
+      // Backward compatibility with old field name (direct key content)
+      sshTunnelFields.ssh_private_key = transformed.ssh_tunnel_private_key;
+    }
+    if (transformed.ssh_tunnel_passphrase) {
+      sshTunnelFields.ssh_passphrase = transformed.ssh_tunnel_passphrase;
+    }
+    if (transformed.ssh_tunnel_password) {
+      sshTunnelFields.ssh_password = transformed.ssh_tunnel_password;
+    }
+    
+    // Only create ssh_tunnel object if we have at least host and username
+    if (sshTunnelFields.ssh_host && sshTunnelFields.ssh_username) {
+      transformed.ssh_tunnel = sshTunnelFields;
+    }
+  }
+  
+  // Remove flat ssh_tunnel_* fields
+  delete transformed.ssh_tunnel_enabled;
+  delete transformed.ssh_tunnel_host;
+  delete transformed.ssh_tunnel_port;
+  delete transformed.ssh_tunnel_username;
+  delete transformed.ssh_tunnel_private_key;
+  delete transformed.ssh_tunnel_private_keyFile;
+  delete transformed.ssh_tunnel_private_key_path;
+  delete transformed.ssh_tunnel_passphrase;
+  delete transformed.ssh_tunnel_password;
+  
+  return transformed;
+}
+
 function updateTargetWithValues(target, values) {
   target.name = values.name;
-  Object.keys(values).forEach(key => {
+  
+  // Transform SSH tunnel fields if present
+  const transformedValues = transformSSHTunnelFields(values);
+  
+  Object.keys(transformedValues).forEach(key => {
     if (key !== "name") {
-      target.options[key] = values[key];
+      target.options[key] = transformedValues[key];
     }
   });
+  
+  // If SSH tunnel was disabled, make sure to remove it
+  if (!values.ssh_tunnel_enabled && target.options.ssh_tunnel) {
+    delete target.options.ssh_tunnel;
+  }
 }
 
 function getBase64(file) {

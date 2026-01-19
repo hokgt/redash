@@ -8,6 +8,7 @@ import {
   CheckboxField,
   ContentField,
   FileField,
+  FilePathField,
   InputField,
   NumberField,
   SelectField,
@@ -26,6 +27,7 @@ export const FieldType = PropTypes.shape({
     "number",
     "checkbox",
     "file",
+    "filepath",
     "select",
     "content",
   ]).isRequired,
@@ -52,6 +54,7 @@ export const FieldType = PropTypes.shape({
 const FieldTypeComponent = {
   checkbox: CheckboxField,
   file: FileField,
+  filepath: FilePathField,
   select: SelectField,
   number: NumberField,
   textarea: TextAreaField,
